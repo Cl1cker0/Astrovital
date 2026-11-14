@@ -18,7 +18,7 @@ import { MeshoptSimplifier } from "meshoptimizer";
 const DATA = process.argv[2];
 if (!DATA) throw new Error("usage: node scripts/build-anatomy.mjs <BodyParts3D_data dir>");
 const OUT_BIN = "public/models/anatomy.bin";
-const OUT_JSON = "src/lib/data/anatomy.generated.json";
+const OUT_JSON = "src/features/health-monitoring/presentation/components/interactive-body/anatomy.generated.json";
 
 /* ---------------------------------------------------------------- */
 /* Catalogue                                                         */

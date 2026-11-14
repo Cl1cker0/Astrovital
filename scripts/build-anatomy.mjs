@@ -157,6 +157,7 @@ const round = (v) => Math.round(v * 10000) / 10000;
 /* Build                                                             */
 /* ---------------------------------------------------------------- */
 await MeshoptSimplifier.ready;
+let skinPos = new Float32Array(0);
 const chunks = [];
 const header = [];
 const meta = {};
@@ -196,6 +197,7 @@ for (const g of GROUPS) {
   for (let i = 0; i < pos.length; i += 3)
     for (let a = 0; a < 3; a++) q[i + a] = Math.round(((pos[i + a] - min[a]) / (max[a] - min[a] || 1)) * 65534 - 32767);
 
+  if (g.id === "skin") skinPos = pos;
   const posOffset = push(q);
   const idxOffset = push(idx);
   header.push({ id: g.id, vertices: vCount, indices: iCount, index32: idx instanceof Uint32Array, min: min.map(round), max: max.map(round), posOffset, idxOffset });
@@ -216,16 +218,39 @@ for (const g of GROUPS) {
   console.log(`${g.id.padEnd(10)} parts ${String(meshes.length).padStart(4)}  tris ${String(total).padStart(8)} -> ${String(iCount / 3).padStart(7)}  verts ${vCount}`);
 }
 
-// wrist sensor: distal end of the left radius
+// wrist sensor: band around the left forearm where a watch sits, sized to the skin
 {
-  const r = readStl(ids("FMA23465")[0]);
-  let lo = 0;
-  for (let i = 0; i < r.pos.length; i += 3) if (r.pos[i + 1] < r.pos[lo * 3 + 1]) lo = i / 3;
-  const c = centroid(r.pos);
-  const tip = [r.pos[lo * 3], r.pos[lo * 3 + 1], r.pos[lo * 3 + 2]];
-  const dir = tip.map((v, a) => v - c[a]);
-  const len = Math.hypot(...dir);
-  meta.wristSensor = { position: tip.map((v, a) => round(v - (dir[a] / len) * 0.035)), direction: dir.map((v) => round(v / len)) };
+  const radius = readStl(ids("FMA23465")[0]).pos; // left radius
+  const ulna = readStl(ids("FMA23468")[0]).pos; // left ulna
+  const both = new Float32Array([...radius, ...ulna]);
+  let yMin = Infinity, yMax = -Infinity;
+  for (let i = 1; i < both.length; i += 3) { yMin = Math.min(yMin, both[i]); yMax = Math.max(yMax, both[i]); }
+  const slab = (lo, hi) => {
+    const c = [0, 0, 0];
+    let n = 0;
+    for (let i = 0; i < both.length; i += 3) if (both[i + 1] >= lo && both[i + 1] <= hi) { c[0] += both[i]; c[1] += both[i + 1]; c[2] += both[i + 2]; n++; }
+    return c.map((v) => v / n);
+  };
+  const distal = slab(yMin, yMin + 0.015); // wrist joint, between radius and ulna
+  const proximal = slab(yMax - 0.03, yMax); // elbow
+  const axis = distal.map((v, a) => v - proximal[a]);
+  const al = Math.hypot(...axis);
+  const dir = axis.map((v) => v / al);
+  const center = distal.map((v, a) => v - dir[a] * 0.03); // 3 cm proximal of the joint
+  // skin cross-section radius around the axis at that point
+  const dists = [];
+  for (let i = 0; i < skinPos.length; i += 3) {
+    const d = [skinPos[i] - center[0], skinPos[i + 1] - center[1], skinPos[i + 2] - center[2]];
+    const along = d[0] * dir[0] + d[1] * dir[1] + d[2] * dir[2];
+    if (Math.abs(along) > 0.006) continue;
+    const perp = d.map((v, a) => v - along * dir[a]);
+    const r = Math.hypot(...perp);
+    if (r < 0.06) dists.push(r);
+  }
+  dists.sort((a, b) => a - b);
+  const skinR = dists.length ? dists[Math.floor(dists.length * 0.85)] : 0.027;
+  meta.wristSensor = { position: center.map(round), direction: dir.map(round), radius: round(skinR + 0.0015) };
+  console.log("wrist sensor", meta.wristSensor, "skin samples", dists.length);
 }
 
 const hjson = Buffer.from(JSON.stringify(header));

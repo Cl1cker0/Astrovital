@@ -159,7 +159,7 @@ function Skin({ part, clock, visible, focused }: { part: Part; clock: React.RefO
   useFrame((_, dt) => {
     syncUniforms([shell, pointsMat], clock.current);
     const k = ease(dt);
-    const target = !visible ? 0 : focused ? 0.45 : 1;
+    const target = !visible ? 0 : focused ? 0.16 : 1;
     shell.uniforms.uOpacity.value = THREE.MathUtils.lerp(shell.uniforms.uOpacity.value, target, k);
     pointsMat.uniforms.uSize.value = THREE.MathUtils.lerp(pointsMat.uniforms.uSize.value, visible && !focused ? 1.7 : 0, k);
     points.current!.visible = pointsMat.uniforms.uSize.value > 0.02;
@@ -212,9 +212,9 @@ function Structures({ parts, crew, selected, focused, layers, clock, onSelect, o
       });
     }
     // EVA suit wrist sensor: a band around the distal left forearm
-    const ws = (ANATOMY as unknown as { wristSensor: { position: number[]; direction: number[] } }).wristSensor;
-    const band = new THREE.TorusGeometry(0.027, 0.005, 12, 64);
-    band.scale(1, 0.8, 1);
+    const ws = (ANATOMY as unknown as { wristSensor: { position: number[]; direction: number[]; radius: number } }).wristSensor;
+    const band = new THREE.TorusGeometry(ws.radius, 0.0045, 12, 72);
+    band.scale(1.08, 0.86, 1); // wrists are wider side-to-side than front-to-back
     band.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(...ws.direction).normalize()));
     band.computeBoundsTree();
     list.push({
@@ -228,6 +228,8 @@ function Structures({ parts, crew, selected, focused, layers, clock, onSelect, o
   }, [parts]);
 
   const refs = React.useRef<Partial<Record<OrganId, THREE.Mesh | null>>>({});
+  // Ghosted (non-selected while focused) structures let pointer events pass through.
+  const ghosts = React.useRef<Partial<Record<OrganId, boolean>>>({});
 
   useFrame(({ clock: c }, dt) => {
     const t = c.elapsedTime;
@@ -243,11 +245,13 @@ function Structures({ parts, crew, selected, focused, layers, clock, onSelect, o
       const target = isSel ? (status === "nominal" ? C.selected : C.status[status]) : status === "nominal" ? baseColor(it.id) : C.status[status];
       const u = it.material.uniforms;
       (u.uColor.value as THREE.Color).lerp(target, k);
-      const dim = focused && !isSel ? 0.38 : 1;
-      let base = isSel ? 1.0 + Math.sin(t * 3) * 0.08 : status !== "nominal" ? 1.05 : it.layer === "bones" ? 0.55 : 0.68;
+      const ghost = focused && !isSel;
+      const dim = ghost ? 0.07 : 1;
+      ghosts.current[it.id] = ghost;
+      let base = isSel ? 1.15 + Math.sin(t * 3) * 0.08 : status !== "nominal" ? 1.05 : it.layer === "bones" ? 0.55 : 0.68;
       if (hovered.current === it.id && !isSel) base += 0.5;
       u.uIntensity.value = THREE.MathUtils.lerp(u.uIntensity.value, visible ? base * dim : 0, k);
-      u.uFill.value = THREE.MathUtils.lerp(u.uFill.value, isSel ? 0.24 : it.layer === "bones" ? 0.16 : 0.28, k);
+      u.uFill.value = THREE.MathUtils.lerp(u.uFill.value, isSel ? 0.34 : it.layer === "bones" ? 0.16 : 0.28, k);
 
       const mesh = refs.current[it.id];
       if (!mesh) continue;
@@ -274,11 +278,12 @@ function Structures({ parts, crew, selected, focused, layers, clock, onSelect, o
           position={it.center}
           renderOrder={3}
           onClick={(e: ThreeEvent<MouseEvent>) => {
-            if (e.delta > 4) return; // it was a drag, not a click
+            if (e.delta > 4 || ghosts.current[it.id]) return; // drag, or ghost: let it pass through
             e.stopPropagation();
             onSelect(it.id);
           }}
           onPointerMove={(e: ThreeEvent<PointerEvent>) => {
+            if (ghosts.current[it.id]) return;
             e.stopPropagation();
             if (hovered.current !== it.id) {
               hovered.current = it.id;

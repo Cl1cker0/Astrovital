@@ -10,6 +10,7 @@ import type {
   OrganId,
   OrganInfo,
 } from "./types";
+import ANATOMY from "./anatomy.generated.json";
 
 export const MISSION = {
   name: "Ares Transit IV",
@@ -25,19 +26,44 @@ export const ENVIRONMENTS: MissionEnvironment[] = [
   { id: "base", name: "Base de superficie", short: "Base", gravity: 0.38, earthDelay: "14m 10s", link: "DSN directo" },
 ];
 
+const A = ANATOMY as unknown as Record<string, { anchor: [number, number, number]; radius: number }> & {
+  wristSensor: { position: [number, number, number] };
+};
+const organ = (id: OrganId, name: string, system: string, category: OrganInfo["category"]): OrganInfo => ({
+  id,
+  name,
+  system,
+  category,
+  anchor: id === "wrist" ? A.wristSensor.position : A[id].anchor,
+  radius: id === "wrist" ? 0.05 : A[id].radius,
+});
+
+/** Anchors and radii come from the anatomy build (scripts/build-anatomy.mjs). */
 export const ORGANS: OrganInfo[] = [
-  { id: "brain", name: "Cerebro / SANS", system: "Neuro-ocular", anchor: [0, 1.662, 0.005] },
-  { id: "inner-ear", name: "Oído interno", system: "Vestibular", anchor: [0.068, 1.622, 0.0] },
-  { id: "thyroid", name: "Tiroides", system: "Endocrino", anchor: [0, 1.462, 0.03] },
-  { id: "lungs", name: "Pulmones", system: "Respiratorio", anchor: [-0.072, 1.31, 0.03] },
-  { id: "heart", name: "Corazón", system: "Cardiovascular", anchor: [0.028, 1.265, 0.06] },
-  { id: "liver", name: "Hígado", system: "Hepático", anchor: [-0.05, 1.175, 0.05] },
-  { id: "stomach", name: "Estómago", system: "Digestivo", anchor: [0.06, 1.16, 0.055] },
-  { id: "kidneys", name: "Riñones", system: "Renal", anchor: [0.054, 1.085, -0.05] },
-  { id: "intestine", name: "Microbioma", system: "Gastrointestinal", anchor: [0, 1.0, 0.06] },
-  { id: "wrist", name: "Sensor de muñeca", system: "Telemetría SUIT", anchor: [0.425, 1.125, 0.115] },
-  { id: "femur", name: "Fémur", system: "Músculo-esquelético", anchor: [0.126, 0.68, -0.008] },
-  { id: "calcaneus", name: "Calcáneo", system: "Fluid shift podálico", anchor: [0.226, 0.035, -0.062] },
+  organ("brain", "Cerebro", "Neurológico", "organ"),
+  organ("eyes", "Ojos y nervio óptico", "Neuro-oftálmico", "organ"),
+  organ("thyroid", "Laringe y región tiroidea", "Endocrino", "organ"),
+  organ("lungs", "Pulmones y bronquios", "Respiratorio", "organ"),
+  organ("heart", "Corazón", "Cardiovascular", "organ"),
+  organ("vessels", "Grandes vasos", "Vascular", "organ"),
+  organ("liver", "Hígado y vesícula", "Hepatobiliar", "organ"),
+  organ("stomach", "Estómago y esófago", "Digestivo", "organ"),
+  organ("spleen", "Bazo", "Inmunológico", "organ"),
+  organ("pancreas", "Páncreas", "Endocrino", "organ"),
+  organ("kidneys", "Riñones y vía urinaria", "Renal", "organ"),
+  organ("intestine", "Intestinos", "Gastrointestinal", "organ"),
+  organ("skull", "Cráneo", "Esqueleto axial", "bone"),
+  organ("spine", "Columna vertebral", "Esqueleto axial", "bone"),
+  organ("ribcage", "Caja torácica", "Esqueleto axial", "bone"),
+  organ("shoulder", "Cintura escapular", "Esqueleto apendicular", "bone"),
+  organ("humerus", "Húmero", "Esqueleto apendicular", "bone"),
+  organ("forearm", "Radio y cúbito", "Esqueleto apendicular", "bone"),
+  organ("hand", "Mano", "Esqueleto apendicular", "bone"),
+  organ("pelvis", "Pelvis", "Esqueleto axial", "bone"),
+  organ("femur", "Fémur", "Esqueleto apendicular", "bone"),
+  organ("tibia", "Tibia y peroné", "Esqueleto apendicular", "bone"),
+  organ("calcaneus", "Pie y calcáneo", "Esqueleto apendicular", "bone"),
+  organ("wrist", "Sensor de muñeca", "Telemetría SUIT", "device"),
 ];
 
 export const ORGAN_BY_ID = Object.fromEntries(ORGANS.map((o) => [o.id, o])) as Record<OrganId, OrganInfo>;
@@ -56,18 +82,18 @@ const BASELINE: Record<OrganId, OrganAssessment> = {
     ],
     action: "Programar OCT de control",
   },
-  "inner-ear": {
-    organId: "inner-ear",
+  eyes: {
+    organId: "eyes",
     status: "nominal",
-    title: "Sistema vestibular habituado",
+    title: "Globo ocular y nervio óptico normales",
     summary:
-      "Desacoplamiento otolítico compensado tras el periodo de habituación. Sin nistagmo espontáneo reportado en los últimos 7 soles.",
+      "Sin aplanamiento del polo posterior ni pliegues coroideos. Diámetro de la vaina del nervio óptico dentro de rango por ecografía ocular.",
     metrics: [
-      { label: "Nistagmo", value: "0.1", unit: "°/s" },
-      { label: "Romberg", value: "Normal" },
-      { label: "Mareo (MSSQ)", value: "4", unit: "/30" },
+      { label: "Vaina n. óptico", value: "4.9", unit: "mm", hint: "Ecografía" },
+      { label: "Refracción", value: "0.00", unit: "D" },
+      { label: "PIO", value: "15", unit: "mmHg", hint: "Tonómetro" },
     ],
-    action: "Calibrar prueba de nistagmo",
+    action: "Programar ecografía ocular",
   },
   thyroid: {
     organId: "thyroid",
@@ -197,6 +223,152 @@ const BASELINE: Record<OrganId, OrganAssessment> = {
     ],
     action: "Activar thigh cuffs",
   },
+  vessels: {
+    organId: "vessels",
+    status: "nominal",
+    title: "Flujo yugular y aórtico normales",
+    summary:
+      "Sin estasis ni flujo retrógrado en la vena yugular interna. Rigidez arterial estable respecto a la línea base preflight.",
+    metrics: [
+      { label: "Flujo yugular", value: "Anterógrado" },
+      { label: "Vel. onda pulso", value: "7.1", unit: "m/s" },
+      { label: "Área VYI", value: "0.62", unit: "cm²" },
+    ],
+    action: "Ecografía de vena yugular",
+  },
+  spleen: {
+    organId: "spleen",
+    status: "nominal",
+    title: "Bazo de tamaño normal",
+    summary: "Sin esplenomegalia. Recuento linfocitario estable pese a la reactivación latente esperada en vuelo prolongado.",
+    metrics: [
+      { label: "Eje mayor", value: "10.8", unit: "cm" },
+      { label: "Linfocitos", value: "1.9", unit: "×10⁹/L" },
+      { label: "PCR", value: "1.2", unit: "mg/L" },
+    ],
+    action: "Perfil hematológico rápido",
+  },
+  pancreas: {
+    organId: "pancreas",
+    status: "nominal",
+    title: "Control glucémico estable",
+    summary: "Sensibilidad a la insulina dentro de rango a pesar de la reducción de actividad muscular en gravedad parcial.",
+    metrics: [
+      { label: "Glucosa", value: "92", unit: "mg/dL" },
+      { label: "HbA1c", value: "5.2", unit: "%" },
+      { label: "Lipasa", value: "38", unit: "U/L" },
+    ],
+    action: "Curva de glucosa capilar",
+  },
+  skull: {
+    organId: "skull",
+    status: "nominal",
+    title: "Bóveda craneal íntegra",
+    summary: "Sin lesiones ni fracturas. Densidad ósea craneal estable; en microgravedad puede aumentar levemente por redistribución de carga.",
+    metrics: [
+      { label: "Δ densidad", value: "+0.3", unit: "%" },
+      { label: "Impactos", value: "0", hint: "Últimos 30 soles" },
+      { label: "Casco EVA", value: "OK" },
+    ],
+    action: "Revisar registro de impactos",
+  },
+  spine: {
+    organId: "spine",
+    status: "nominal",
+    title: "Elongación espinal compensada",
+    summary:
+      "Los discos intervertebrales se expanden sin carga axial y la columna se alarga. Sin dolor lumbar significativo ni herniación.",
+    metrics: [
+      { label: "Elongación", value: "+3.2", unit: "cm" },
+      { label: "Altura disco L4-L5", value: "+1.1", unit: "mm" },
+      { label: "Dolor lumbar", value: "1", unit: "/10" },
+    ],
+    action: "Programar ejercicio de estabilización",
+  },
+  ribcage: {
+    organId: "ribcage",
+    status: "nominal",
+    title: "Caja torácica sin hallazgos",
+    summary: "Excursión torácica simétrica. Sin fracturas costales ni dolor a la palpación.",
+    metrics: [
+      { label: "Excursión", value: "6.4", unit: "cm" },
+      { label: "Δ densidad", value: "−0.4", unit: "%" },
+      { label: "Dolor", value: "0", unit: "/10" },
+    ],
+    action: "Registrar espirometría",
+  },
+  shoulder: {
+    organId: "shoulder",
+    status: "nominal",
+    title: "Hombros sin sobrecarga EVA",
+    summary: "Rango de movimiento completo. Sin signos de pinzamiento por uso prolongado del traje presurizado.",
+    metrics: [
+      { label: "Abducción", value: "175", unit: "°" },
+      { label: "Fuerza", value: "5", unit: "/5" },
+      { label: "Horas EVA", value: "38", unit: "h" },
+    ],
+    action: "Evaluar rango de movimiento",
+  },
+  humerus: {
+    organId: "humerus",
+    status: "nominal",
+    title: "Húmero estable",
+    summary: "Pérdida ósea mínima en miembro superior, que mantiene carga funcional durante las tareas de la misión.",
+    metrics: [
+      { label: "Δ densidad", value: "−0.3", unit: "%" },
+      { label: "Masa muscular", value: "−1.1", unit: "%" },
+      { label: "Fuerza agarre", value: "41", unit: "kg" },
+    ],
+    action: "Medir fuerza de agarre",
+  },
+  forearm: {
+    organId: "forearm",
+    status: "nominal",
+    title: "Antebrazo sin hallazgos",
+    summary: "Radio y cúbito con densidad conservada. Sin tendinopatía por manipulación de herramientas en EVA.",
+    metrics: [
+      { label: "Δ densidad", value: "−0.2", unit: "%" },
+      { label: "Pronación", value: "85", unit: "°" },
+      { label: "Supinación", value: "88", unit: "°" },
+    ],
+    action: "Evaluar movilidad",
+  },
+  hand: {
+    organId: "hand",
+    status: "nominal",
+    title: "Manos y uñas íntegras",
+    summary: "Sin onicólisis ni lesiones por presión de los guantes del traje. Sensibilidad digital conservada.",
+    metrics: [
+      { label: "Onicólisis", value: "0", unit: "dedos" },
+      { label: "Sensibilidad", value: "Normal" },
+      { label: "Destreza", value: "98", unit: "%" },
+    ],
+    action: "Inspección post-EVA",
+  },
+  pelvis: {
+    organId: "pelvis",
+    status: "nominal",
+    title: "Pelvis y cadera estables",
+    summary: "Densidad del cuello femoral y la cresta ilíaca dentro del margen tolerado por protocolo.",
+    metrics: [
+      { label: "DMO cadera", value: "0.98", unit: "g/cm²" },
+      { label: "Δ densidad", value: "−0.8", unit: "%" },
+      { label: "T-score", value: "−0.2" },
+    ],
+    action: "Programar densitometría",
+  },
+  tibia: {
+    organId: "tibia",
+    status: "nominal",
+    title: "Tibia y peroné conservados",
+    summary: "Pérdida trabecular leve en tibia distal, compensada con la cinta de correr y la carga resistiva diaria.",
+    metrics: [
+      { label: "Δ densidad", value: "−0.9", unit: "%" },
+      { label: "Masa gemelo", value: "−2.4", unit: "%" },
+      { label: "Adherencia", value: "96", unit: "%" },
+    ],
+    action: "Programar sesión de carga",
+  },
 };
 
 function assessments(overrides: Partial<Record<OrganId, Partial<OrganAssessment>>> = {}) {
@@ -234,6 +406,18 @@ export const CREW: CrewMember[] = [
       skinTemp: 34.2,
     },
     assessments: assessments({
+      eyes: {
+        status: "caution",
+        title: "Aplanamiento del globo posterior",
+        summary:
+          "Aplanamiento del polo posterior y pliegues coroideos leves, con aumento del diámetro de la vaina del nervio óptico. Compatible con SANS grado 1.",
+        metrics: [
+          { label: "Vaina n. óptico", value: "6.1", unit: "mm", hint: "Ecografía" },
+          { label: "Refracción", value: "+0.50", unit: "D" },
+          { label: "PIO", value: "17", unit: "mmHg", hint: "Tonómetro" },
+        ],
+        action: "Ecografía ocular de control",
+      },
       brain: {
         status: "caution",
         title: "SANS grado 1 en curso",

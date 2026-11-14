@@ -3,25 +3,32 @@
 import * as React from "react";
 import * as THREE from "three";
 import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
-import { OrbitControls } from "@react-three/drei";
+import { CameraControls, PerformanceMonitor } from "@react-three/drei";
 import { Bloom, EffectComposer, Vignette } from "@react-three/postprocessing";
 import { suspend } from "suspend-react";
-import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
+import type CameraControlsImpl from "camera-controls";
+import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
 import { MeshSurfaceSampler } from "three/examples/jsm/math/MeshSurfaceSampler.js";
 import { ORGANS, ORGAN_BY_ID } from "@/lib/data/mock";
+import ANATOMY from "@/lib/data/anatomy.generated.json";
 import type { CrewMember, OrganId, Status } from "@/lib/data/types";
 import { STATUS_META } from "@/lib/status";
-import { buildOrgans, buildSkeleton, buildVessels } from "./anatomy";
 import { makeFloorMaterial, makePointsMaterial, makeShellMaterial, makeXrayMaterial } from "./shaders";
+
+// BVH-accelerated raycasting: hover/click over ~700k triangles stays instant.
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 /* WebGL can't read CSS variables, so the palette is mirrored here. */
 const C = {
   bg: new THREE.Color("#080b11"),
   shell: new THREE.Color("#7f9cf5"),
   points: new THREE.Color("#b9c9ff"),
-  bone: new THREE.Color("#c9d3e6"),
-  vessel: new THREE.Color("#6f86c9"),
-  organ: new THREE.Color("#9aa9c4"),
+  organ: new THREE.Color("#a3b1cc"),
+  bone: new THREE.Color("#dde3ee"),
+  vessel: new THREE.Color("#8d9fe0"),
+  device: new THREE.Color("#8aa8ff"),
   selected: new THREE.Color("#86a6ff"),
   status: {
     nominal: new THREE.Color("#4fbf8b"),
@@ -31,30 +38,68 @@ const C = {
 };
 
 const REVEAL_TIME = 2.6;
+/** Frame-rate independent smoothing factor (~0.12 at 60 fps). */
+const ease = (dt: number, rate = 8) => 1 - Math.exp(-rate * Math.min(dt, 0.25));
 const TOP = 1.8;
 
+export type Layer = "skin" | "organs" | "bones" | "vessels";
+export type Layers = Record<Layer, boolean>;
+export type ViewPreset = "front" | "back" | "left" | "right" | "top" | "reset";
+
+const layerOf = (id: OrganId): Layer => {
+  const o = ORGAN_BY_ID[id];
+  if (id === "vessels") return "vessels";
+  return o.category === "bone" ? "bones" : "organs";
+};
+
 /* ------------------------------------------------------------------ */
-/* Baked body mesh                                                     */
+/* Anatomy loader (public/models/anatomy.bin, see scripts/)            */
 /* ------------------------------------------------------------------ */
-async function loadBody(): Promise<THREE.BufferGeometry> {
-  const buf = await fetch("/models/body.bin").then((r) => r.arrayBuffer());
-  const view = new DataView(buf);
-  const hl = view.getUint32(0, true);
-  const header: { name: string; verts: number; indices: number }[] = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hl)).trim());
-  let off = 4 + hl;
-  const parts = header.map((h) => {
-    const pos = new Float32Array(buf.slice(off, off + h.verts * 12));
-    off += h.verts * 12;
-    const idx = new Uint32Array(buf.slice(off, off + h.indices * 4));
-    off += h.indices * 4;
+interface Part {
+  geometry: THREE.BufferGeometry;
+  center: THREE.Vector3;
+}
+
+async function loadAnatomy(): Promise<Record<string, Part>> {
+  const version = (ANATOMY as unknown as { version?: string }).version ?? "dev";
+  const buf = await fetch(`/models/anatomy.bin?v=${version}`).then((r) => {
+    if (!r.ok) throw new Error(`anatomy.bin: ${r.status}`);
+    return r.arrayBuffer();
+  });
+  const hl = new DataView(buf).getUint32(0, true);
+  const header: {
+    id: string;
+    vertices: number;
+    indices: number;
+    index32: boolean;
+    min: number[];
+    max: number[];
+    posOffset: number;
+    idxOffset: number;
+  }[] = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hl)));
+  const base = 4 + hl;
+  const out: Record<string, Part> = {};
+  for (const h of header) {
+    const q = new Int16Array(buf, base + h.posOffset, h.vertices * 3);
+    const pos = new Float32Array(h.vertices * 3);
+    for (let i = 0; i < pos.length; i++) {
+      const a = i % 3;
+      pos[i] = h.min[a] + ((q[i] + 32767) / 65534) * (h.max[a] - h.min[a]);
+    }
+    const idx = h.index32 ? new Uint32Array(buf, base + h.idxOffset, h.indices) : new Uint16Array(buf, base + h.idxOffset, h.indices);
     const g = new THREE.BufferGeometry();
     g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-    g.setIndex(new THREE.BufferAttribute(idx, 1));
+    g.setIndex(new THREE.BufferAttribute(idx.slice(), 1));
     g.computeVertexNormals();
-    return { name: h.name, g };
-  });
-  // Skin only: the rig's inner "joint" mesh reads as mechanical spheres.
-  return (parts.find((p) => p.name === "body") ?? parts[0]).g;
+    g.computeBoundingSphere();
+    const center = h.id === "skin" ? new THREE.Vector3() : g.boundingSphere!.center.clone();
+    if (h.id !== "skin") {
+      g.translate(-center.x, -center.y, -center.z);
+      g.computeBoundsTree();
+    }
+    out[h.id] = { geometry: g, center };
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -69,42 +114,34 @@ function useSceneClock(heightScale: number) {
     if (start.current == null) start.current = c.elapsedTime;
     const t = c.elapsedTime - start.current;
     const k = Math.min(t / REVEAL_TIME, 1);
-    const eased = 1 - Math.pow(1 - k, 3);
     clock.current.time = c.elapsedTime;
-    clock.current.reveal = k < 1 ? eased * TOP * heightScale : 99;
-    const cycle = (((t - REVEAL_TIME) * 0.16) % 1 + 1) % 1;
+    clock.current.reveal = k < 1 ? (1 - Math.pow(1 - k, 3)) * TOP * heightScale : 99;
+    const cycle = ((((t - REVEAL_TIME) * 0.14) % 1) + 1) % 1;
     clock.current.scan = k < 1 ? clock.current.reveal : (cycle * 1.25 - 0.1) * TOP * heightScale;
   });
   return clock;
 }
 
-function useUniformSync(materials: THREE.ShaderMaterial[], clock: React.RefObject<Clock>) {
-  useFrame(() => {
-    for (const m of materials) {
-      if (m.uniforms.uReveal) m.uniforms.uReveal.value = clock.current.reveal;
-      if (m.uniforms.uScan) m.uniforms.uScan.value = clock.current.scan;
-      if (m.uniforms.uTime) m.uniforms.uTime.value = clock.current.time;
-    }
-  });
+function syncUniforms(materials: THREE.ShaderMaterial[], clock: Clock) {
+  for (const m of materials) {
+    if (m.uniforms.uReveal) m.uniforms.uReveal.value = clock.reveal;
+    if (m.uniforms.uScan) m.uniforms.uScan.value = clock.scan;
+    if (m.uniforms.uTime) m.uniforms.uTime.value = clock.time;
+  }
 }
 
 /* ------------------------------------------------------------------ */
-/* Body: shell + point cloud + skeleton + vessels                      */
+/* Skin: hologram shell + surface point cloud                          */
 /* ------------------------------------------------------------------ */
-function Body({ clock, focused }: { clock: React.RefObject<Clock>; focused: boolean }) {
-  const geometry = suspend(loadBody, ["astrovital-body"]);
+function Skin({ part, clock, visible, focused }: { part: Part; clock: React.RefObject<Clock>; visible: boolean; focused: boolean }) {
   const dpr = useThree((s) => s.viewport.dpr);
-
   const shell = React.useMemo(() => makeShellMaterial(C.shell), []);
-  const bones = React.useMemo(() => makeXrayMaterial(C.bone, 0.1, 0.55), []);
-  const vessels = React.useMemo(() => makeXrayMaterial(C.vessel, 0.2, 0.6), []);
   const pointsMat = React.useMemo(() => makePointsMaterial(C.points, dpr), [dpr]);
-  const skeleton = React.useMemo(() => buildSkeleton(), []);
-  const vesselGeo = React.useMemo(() => buildVessels(), []);
+  const points = React.useRef<THREE.Points>(null);
 
   const cloud = React.useMemo(() => {
-    const sampler = new MeshSurfaceSampler(new THREE.Mesh(geometry)).build();
-    const N = 26000;
+    const sampler = new MeshSurfaceSampler(new THREE.Mesh(part.geometry)).build();
+    const N = 30000;
     const pos = new Float32Array(N * 3);
     const rnd = new Float32Array(N);
     const p = new THREE.Vector3();
@@ -117,109 +154,144 @@ function Body({ clock, focused }: { clock: React.RefObject<Clock>; focused: bool
     g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
     g.setAttribute("aRand", new THREE.BufferAttribute(rnd, 1));
     return g;
-  }, [geometry]);
+  }, [part]);
 
-  useUniformSync([shell, bones, vessels, pointsMat], clock);
-  useFrame(() => {
-    const k = 0.06;
-    shell.uniforms.uOpacity.value = THREE.MathUtils.lerp(shell.uniforms.uOpacity.value, focused ? 0.55 : 1, k);
-    bones.uniforms.uIntensity.value = THREE.MathUtils.lerp(bones.uniforms.uIntensity.value, focused ? 0.32 : 0.55, k);
-    vessels.uniforms.uIntensity.value = THREE.MathUtils.lerp(vessels.uniforms.uIntensity.value, focused ? 0.3 : 0.6, k);
+  useFrame((_, dt) => {
+    syncUniforms([shell, pointsMat], clock.current);
+    const k = ease(dt);
+    const target = !visible ? 0 : focused ? 0.45 : 1;
+    shell.uniforms.uOpacity.value = THREE.MathUtils.lerp(shell.uniforms.uOpacity.value, target, k);
+    pointsMat.uniforms.uSize.value = THREE.MathUtils.lerp(pointsMat.uniforms.uSize.value, visible && !focused ? 1.7 : 0, k);
+    points.current!.visible = pointsMat.uniforms.uSize.value > 0.02;
   });
 
   return (
     <group>
-      <mesh geometry={geometry} material={shell} renderOrder={1} raycast={() => null} />
-      <points geometry={cloud} material={pointsMat} renderOrder={2} raycast={() => null} />
-      <mesh geometry={skeleton} material={bones} raycast={() => null} />
-      <mesh geometry={vesselGeo} material={vessels} raycast={() => null} />
+      <mesh geometry={part.geometry} material={shell} renderOrder={1} raycast={() => null} />
+      <points ref={points} geometry={cloud} material={pointsMat} renderOrder={2} raycast={() => null} />
     </group>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/* Organs                                                              */
+/* Clickable anatomy                                                   */
 /* ------------------------------------------------------------------ */
-function Organs({
-  crew,
-  selected,
-  onSelect,
-  clock,
-  focused,
-}: {
+interface StructuresProps {
+  parts: Record<string, Part>;
   crew: CrewMember;
   selected: OrganId;
-  onSelect: (id: OrganId) => void;
-  clock: React.RefObject<Clock>;
   focused: boolean;
-}) {
-  const [hovered, setHovered] = React.useState<OrganId | null>(null);
+  layers: Layers;
+  clock: React.RefObject<Clock>;
+  onSelect: (id: OrganId) => void;
+  onHover: (id: OrganId | null, e?: ThreeEvent<PointerEvent>) => void;
+}
 
-  const organs = React.useMemo(() => {
-    const geos = buildOrgans();
-    return ORGANS.map((o) => {
-      const g = geos[o.id];
-      g.computeBoundingSphere();
-      const center = g.boundingSphere!.center.clone();
-      g.translate(-center.x, -center.y, -center.z);
-      return { id: o.id, geometry: g, center, material: makeXrayMaterial(C.organ, 0.3, 0.8) };
+function baseColor(id: OrganId) {
+  if (id === "vessels") return C.vessel;
+  const cat = ORGAN_BY_ID[id].category;
+  return cat === "bone" ? C.bone : cat === "device" ? C.device : C.organ;
+}
+
+function Structures({ parts, crew, selected, focused, layers, clock, onSelect, onHover }: StructuresProps) {
+  const hovered = React.useRef<OrganId | null>(null);
+
+  const items = React.useMemo(() => {
+    const list: { id: OrganId; geometry: THREE.BufferGeometry; center: THREE.Vector3; material: THREE.ShaderMaterial; layer: Layer }[] = [];
+    for (const o of ORGANS) {
+      if (o.id === "wrist") continue;
+      const p = parts[o.id];
+      if (!p) continue;
+      const bone = o.category === "bone";
+      list.push({
+        id: o.id,
+        geometry: p.geometry,
+        center: p.center,
+        material: makeXrayMaterial(baseColor(o.id), bone ? 0.16 : 0.3, bone ? 0.6 : 0.7),
+        layer: layerOf(o.id),
+      });
+    }
+    // EVA suit wrist sensor: a band around the distal left forearm
+    const ws = (ANATOMY as unknown as { wristSensor: { position: number[]; direction: number[] } }).wristSensor;
+    const band = new THREE.TorusGeometry(0.027, 0.005, 12, 64);
+    band.scale(1, 0.8, 1);
+    band.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(...ws.direction).normalize()));
+    band.computeBoundsTree();
+    list.push({
+      id: "wrist",
+      geometry: band,
+      center: new THREE.Vector3(...ws.position),
+      material: makeXrayMaterial(C.device, 0.45, 0.9),
+      layer: "organs",
     });
-  }, []);
+    return list;
+  }, [parts]);
 
   const refs = React.useRef<Partial<Record<OrganId, THREE.Mesh | null>>>({});
-  useUniformSync(
-    organs.map((o) => o.material),
-    clock
-  );
 
-  useFrame(({ clock: c }) => {
+  useFrame(({ clock: c }, dt) => {
     const t = c.elapsedTime;
-    for (const o of organs) {
-      const status = crew.assessments[o.id]?.status ?? "nominal";
-      const isSel = o.id === selected;
-      const target = isSel ? (status === "nominal" ? C.selected : C.status[status]) : status === "nominal" ? C.organ : C.status[status];
-      const u = o.material.uniforms;
-      (u.uColor.value as THREE.Color).lerp(target, 0.1);
-      const dim = focused && !isSel ? 0.5 : 1;
-      const base = (isSel ? 1.55 + Math.sin(t * 3) * 0.2 : status !== "nominal" ? 1.05 : 0.62) * dim;
-      u.uIntensity.value = THREE.MathUtils.lerp(u.uIntensity.value, hovered === o.id ? base + 0.45 : base, 0.12);
-      u.uFill.value = THREE.MathUtils.lerp(u.uFill.value, isSel ? 0.45 : 0.28, 0.1);
+    const k = ease(dt);
+    syncUniforms(
+      items.map((i) => i.material),
+      clock.current
+    );
+    for (const it of items) {
+      const status = crew.assessments[it.id]?.status ?? "nominal";
+      const isSel = it.id === selected;
+      const visible = layers[it.layer] || isSel;
+      const target = isSel ? (status === "nominal" ? C.selected : C.status[status]) : status === "nominal" ? baseColor(it.id) : C.status[status];
+      const u = it.material.uniforms;
+      (u.uColor.value as THREE.Color).lerp(target, k);
+      const dim = focused && !isSel ? 0.38 : 1;
+      let base = isSel ? 1.0 + Math.sin(t * 3) * 0.08 : status !== "nominal" ? 1.05 : it.layer === "bones" ? 0.55 : 0.68;
+      if (hovered.current === it.id && !isSel) base += 0.5;
+      u.uIntensity.value = THREE.MathUtils.lerp(u.uIntensity.value, visible ? base * dim : 0, k);
+      u.uFill.value = THREE.MathUtils.lerp(u.uFill.value, isSel ? 0.24 : it.layer === "bones" ? 0.16 : 0.28, k);
 
-      const mesh = refs.current[o.id];
+      const mesh = refs.current[it.id];
       if (!mesh) continue;
-      if (o.id === "heart") {
+      mesh.visible = u.uIntensity.value > 0.01;
+      if (it.id === "heart") {
         const beat = Math.pow(Math.max(0, Math.sin(t * (crew.vitals.heartRate / 60) * Math.PI * 2)), 12);
-        mesh.scale.setScalar(1 + beat * 0.09);
-      } else if (o.id === "lungs") {
-        mesh.scale.setScalar(1 + Math.sin(t * (crew.vitals.respRate / 60) * Math.PI * 2) * 0.025);
+        mesh.scale.setScalar(1 + beat * 0.035);
+      } else if (it.id === "lungs") {
+        mesh.scale.setScalar(1 + Math.sin(t * (crew.vitals.respRate / 60) * Math.PI * 2) * 0.012);
       }
     }
   });
 
   return (
     <group>
-      {organs.map((o) => (
+      {items.map((it) => (
         <mesh
-          key={o.id}
+          key={it.id}
           ref={(m) => {
-            refs.current[o.id] = m;
+            refs.current[it.id] = m;
           }}
-          geometry={o.geometry}
-          material={o.material}
-          position={o.center}
+          geometry={it.geometry}
+          material={it.material}
+          position={it.center}
           renderOrder={3}
           onClick={(e: ThreeEvent<MouseEvent>) => {
+            if (e.delta > 4) return; // it was a drag, not a click
             e.stopPropagation();
-            onSelect(o.id);
+            onSelect(it.id);
           }}
-          onPointerOver={(e: ThreeEvent<PointerEvent>) => {
+          onPointerMove={(e: ThreeEvent<PointerEvent>) => {
             e.stopPropagation();
-            setHovered(o.id);
-            document.body.style.cursor = "pointer";
+            if (hovered.current !== it.id) {
+              hovered.current = it.id;
+              document.body.style.cursor = "pointer";
+            }
+            onHover(it.id, e);
           }}
           onPointerOut={() => {
-            setHovered(null);
-            document.body.style.cursor = "";
+            if (hovered.current === it.id) {
+              hovered.current = null;
+              document.body.style.cursor = "";
+              onHover(null);
+            }
           }}
         />
       ))}
@@ -231,20 +303,19 @@ function Organs({
 /* Floor, rings and height ruler                                       */
 /* ------------------------------------------------------------------ */
 function Platform({ heightScale, focused }: { heightScale: number; focused: boolean }) {
-  const rulerMat = React.useMemo(() => new THREE.LineBasicMaterial({ color: C.shell, transparent: true, opacity: 0.35 }), []);
   const floor = React.useMemo(() => makeFloorMaterial(C.shell), []);
+  const rulerMat = React.useMemo(() => new THREE.LineBasicMaterial({ color: C.shell, transparent: true, opacity: 0.35 }), []);
   const ring = React.useRef<THREE.Group>(null);
   useFrame(({ clock }, dt) => {
     floor.uniforms.uTime.value = clock.elapsedTime;
     if (ring.current) ring.current.rotation.z += dt * 0.05;
-    rulerMat.opacity = THREE.MathUtils.lerp(rulerMat.opacity, focused ? 0 : 0.35, 0.08);
+    rulerMat.opacity = THREE.MathUtils.lerp(rulerMat.opacity, focused ? 0 : 0.35, ease(dt));
   });
 
   const ruler = React.useMemo(() => {
     const pts: number[] = [];
-    const x = -0.52;
-    const h = TOP * heightScale;
-    pts.push(x, 0, 0, x, h, 0);
+    const x = -0.55;
+    pts.push(x, 0, 0, x, TOP * heightScale, 0);
     for (let i = 0; i <= 18; i++) {
       const y = (i / 10) * heightScale;
       const len = i % 5 === 0 ? 0.04 : 0.018;
@@ -300,85 +371,148 @@ function ScanPlane({ clock }: { clock: React.RefObject<Clock> }) {
   return (
     <group ref={ref}>
       <mesh rotation={[-Math.PI / 2, 0, 0]} raycast={() => null}>
-        <ringGeometry args={[0.3, 0.302, 128]} />
-        <meshBasicMaterial color={C.points} transparent opacity={0.4} depthWrite={false} blending={THREE.AdditiveBlending} side={THREE.DoubleSide} />
-      </mesh>
-      <mesh rotation={[-Math.PI / 2, 0, 0]} raycast={() => null}>
-        <ringGeometry args={[0.22, 0.3, 64]} />
-        <meshBasicMaterial color={C.shell} transparent opacity={0.02} depthWrite={false} blending={THREE.AdditiveBlending} side={THREE.DoubleSide} />
+        <ringGeometry args={[0.38, 0.382, 128]} />
+        <meshBasicMaterial color={C.points} transparent opacity={0.35} depthWrite={false} blending={THREE.AdditiveBlending} side={THREE.DoubleSide} />
       </mesh>
     </group>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/* Camera rig: intro dolly + fly-to on selection                      */
+/* Free camera: orbit (no angle limits), pan, zoom-to-cursor, keys     */
 /* ------------------------------------------------------------------ */
+const HOME = { pos: new THREE.Vector3(0.55, 1.2, 3.3), target: new THREE.Vector3(0, 0.88, 0) };
+
 function CameraRig({
   selected,
   focused,
   heightScale,
   autoRotate,
+  view,
+  keys,
+  onUserInteract,
 }: {
   selected: OrganId;
   focused: boolean;
   heightScale: number;
   autoRotate: boolean;
+  view: { preset: ViewPreset; n: number };
+  keys: React.RefObject<Set<string>>;
+  onUserInteract: () => void;
 }) {
-  const controls = React.useRef<OrbitControlsImpl>(null);
-  const camera = useThree((s) => s.camera);
-  const fly = React.useRef({ t: 3, target: new THREE.Vector3(0, 0.9, 0), dist: 3.25 });
-  const tmp = React.useMemo(() => new THREE.Vector3(), []);
+  const ref = React.useRef<CameraControlsImpl>(null);
+  const dragging = React.useRef(false);
+  const tmp = React.useMemo(() => ({ t: new THREE.Vector3(), p: new THREE.Vector3(), s: new THREE.Sphere() }), []);
 
+  // intro dolly
   React.useEffect(() => {
-    const f = fly.current;
-    f.t = Math.max(f.t, 1.8);
-    if (focused) {
-      const a = ORGAN_BY_ID[selected].anchor;
-      f.target.set(a[0], a[1], a[2]).multiplyScalar(heightScale);
-      f.dist = selected === "femur" ? 1.7 : selected === "intestine" || selected === "lungs" ? 1.35 : 1.15;
-    } else {
-      f.target.set(0, 0.9 * heightScale, 0);
-      f.dist = 3.25;
+    const c = ref.current;
+    if (!c) return;
+    c.setLookAt(1.4, 1.9, 6.2, HOME.target.x, HOME.target.y * heightScale, HOME.target.z, false);
+    c.setLookAt(HOME.pos.x, HOME.pos.y * heightScale, HOME.pos.z, HOME.target.x, HOME.target.y * heightScale, HOME.target.z, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // fly to the selected structure (keeps the current viewing direction)
+  const first = React.useRef(true);
+  React.useEffect(() => {
+    const c = ref.current;
+    if (!c) return;
+    if (first.current) {
+      first.current = false;
+      return;
     }
-  }, [selected, focused, heightScale]);
+    if (focused) {
+      const o = ORGAN_BY_ID[selected];
+      tmp.s.center.set(o.anchor[0], o.anchor[1], o.anchor[2]).multiplyScalar(heightScale);
+      tmp.s.radius = Math.max(o.radius * heightScale * 1.5, 0.09);
+      void c.fitToSphere(tmp.s, true);
+    } else {
+      c.getPosition(tmp.p);
+      c.getTarget(tmp.t);
+      const dir = tmp.p.sub(tmp.t).normalize();
+      const target = new THREE.Vector3(0, HOME.target.y * heightScale, 0);
+      const pos = target.clone().addScaledVector(dir, 3.3);
+      void c.setLookAt(pos.x, Math.max(pos.y, 0.3), pos.z, target.x, target.y, target.z, true);
+    }
+  }, [selected, focused, heightScale, tmp]);
+
+  // view presets
+  React.useEffect(() => {
+    const c = ref.current;
+    if (!c || view.n === 0) return;
+    const P = Math.PI;
+    switch (view.preset) {
+      case "front":
+        void c.rotateTo(0, P / 2, true);
+        break;
+      case "back":
+        void c.rotateTo(P, P / 2, true);
+        break;
+      case "left":
+        void c.rotateTo(P / 2, P / 2, true);
+        break;
+      case "right":
+        void c.rotateTo(-P / 2, P / 2, true);
+        break;
+      case "top":
+        void c.rotateTo(c.azimuthAngle, 0.08, true);
+        break;
+      case "reset":
+        void c.setLookAt(HOME.pos.x, HOME.pos.y * heightScale, HOME.pos.z, HOME.target.x, HOME.target.y * heightScale, HOME.target.z, true);
+        break;
+    }
+  }, [view, heightScale]);
 
   useFrame((_, dt) => {
-    const f = fly.current;
-    const c = controls.current;
-    if (!c || f.t <= 0) return;
-    f.t -= dt;
-    const k = 1 - Math.pow(0.04, dt);
-    c.target.lerp(f.target, k);
-    tmp.copy(camera.position).sub(c.target);
-    tmp.setLength(THREE.MathUtils.lerp(tmp.length(), f.dist, k));
-    camera.position.copy(c.target).add(tmp);
+    const c = ref.current;
+    if (!c) return;
+    const k = keys.current;
+    if (k.size) {
+      const fast = k.has("shift") ? 2.4 : 1;
+      const d = dt * 0.9 * fast;
+      const r = dt * 1.4 * fast;
+      if (k.has("w")) void c.forward(d, false);
+      if (k.has("s")) void c.forward(-d, false);
+      if (k.has("a")) void c.truck(-d, 0, false);
+      if (k.has("d")) void c.truck(d, 0, false);
+      if (k.has("e")) void c.truck(0, -d, false);
+      if (k.has("q")) void c.truck(0, d, false);
+      if (k.has("arrowleft")) void c.rotate(r, 0, false);
+      if (k.has("arrowright")) void c.rotate(-r, 0, false);
+      if (k.has("arrowup")) void c.rotate(0, r, false);
+      if (k.has("arrowdown")) void c.rotate(0, -r, false);
+    } else if (autoRotate && !dragging.current) {
+      void c.rotate(dt * 0.12, 0, false);
+    }
   });
 
   return (
-    <OrbitControls
-      ref={controls}
+    <CameraControls
+      ref={ref}
       makeDefault
-      enablePan={false}
-      enableDamping
-      dampingFactor={0.07}
-      rotateSpeed={0.6}
-      minDistance={0.8}
-      maxDistance={5}
-      minPolarAngle={Math.PI * 0.2}
-      maxPolarAngle={Math.PI * 0.6}
-      autoRotate={autoRotate}
-      autoRotateSpeed={0.45}
-      target={[0, 0.9, 0]}
+      minDistance={0.08}
+      maxDistance={7}
+      smoothTime={0.32}
+      draggingSmoothTime={0.08}
+      dollyToCursor
+      dollySpeed={0.7}
+      truckSpeed={1.6}
+      azimuthRotateSpeed={0.85}
+      polarRotateSpeed={0.85}
       onStart={() => {
-        fly.current.t = 0;
+        dragging.current = true;
+        onUserInteract();
+      }}
+      onEnd={() => {
+        dragging.current = false;
       }}
     />
   );
 }
 
 /* ------------------------------------------------------------------ */
-/* DOM HUD: projected markers + leader-line callout                    */
+/* DOM HUD: projected markers, leader-line callout, hover label        */
 /* ------------------------------------------------------------------ */
 interface HudRefs {
   markers: Partial<Record<OrganId, HTMLDivElement | null>>;
@@ -387,46 +521,55 @@ interface HudRefs {
   callout: HTMLDivElement | null;
   azimuth: HTMLSpanElement | null;
   elevation: HTMLSpanElement | null;
+  distance: HTMLSpanElement | null;
 }
 
 function Projector({ hud, heightScale, selected }: { hud: React.RefObject<HudRefs>; heightScale: number; selected: OrganId }) {
   const v = React.useMemo(() => new THREE.Vector3(), []);
-  const axis = React.useMemo(() => new THREE.Vector3(), []);
-  const controls = useThree((s) => s.controls) as OrbitControlsImpl | null;
+  const t = React.useMemo(() => new THREE.Vector3(), []);
+  const controls = useThree((s) => s.controls) as unknown as CameraControlsImpl | null;
 
   useFrame(({ camera, size }) => {
     const h = hud.current;
-    let selX = 0;
-    let selY = 0;
+    // camera-controls moves the camera after the last render; refresh before projecting
+    camera.updateMatrixWorld();
+    let selX = -999;
+    let selY = -999;
     for (const o of ORGANS) {
-      v.set(o.anchor[0], o.anchor[1], o.anchor[2]).multiplyScalar(heightScale);
-      axis.set(0, v.y, 0);
-      const behind = camera.position.distanceTo(v) > camera.position.distanceTo(axis) + 0.02;
-      v.project(camera);
+      const el = h.markers[o.id];
+      if (!el && o.id !== selected) continue;
+      v.set(o.anchor[0], o.anchor[1], o.anchor[2]).multiplyScalar(heightScale).project(camera);
       const x = (v.x * 0.5 + 0.5) * size.width;
       const y = (-v.y * 0.5 + 0.5) * size.height;
-      if (o.id === selected) {
+      if (o.id === selected && v.z < 1) {
         selX = x;
         selY = y;
       }
-      const el = h.markers[o.id];
       if (!el) continue;
       el.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
-      el.style.opacity = v.z > 1 ? "0" : behind ? "0.25" : "1";
+      el.style.opacity = v.z > 1 || Math.abs(v.x) > 1.1 || Math.abs(v.y) > 1.1 ? "0" : "1";
     }
     if (h.callout && h.leader && h.leaderDot) {
-      const bx = h.callout.offsetLeft;
-      const by = h.callout.offsetTop + 18;
-      const left = selX < bx;
-      const ex = left ? bx - 1 : bx + h.callout.offsetWidth + 1;
-      const elbowX = left ? Math.min(selX + 40, ex - 24) : Math.max(selX - 40, ex + 24);
-      h.leader.setAttribute("points", `${selX},${selY} ${elbowX},${by} ${ex},${by}`);
-      h.leaderDot.setAttribute("cx", String(selX));
-      h.leaderDot.setAttribute("cy", String(selY));
+      const show = selX > -999;
+      h.leader.style.opacity = show ? "1" : "0";
+      h.leaderDot.style.opacity = show ? "1" : "0";
+      if (show) {
+        const bx = h.callout.offsetLeft;
+        const by = h.callout.offsetTop + 18;
+        const left = selX < bx;
+        const ex = left ? bx - 1 : bx + h.callout.offsetWidth + 1;
+        const elbowX = left ? Math.min(selX + 40, ex - 24) : Math.max(selX - 40, ex + 24);
+        h.leader.setAttribute("points", `${selX},${selY} ${elbowX},${by} ${ex},${by}`);
+        h.leaderDot.setAttribute("cx", String(selX));
+        h.leaderDot.setAttribute("cy", String(selY));
+      }
     }
-    if (controls && h.azimuth && h.elevation) {
-      h.azimuth.textContent = `${((THREE.MathUtils.radToDeg(controls.getAzimuthalAngle()) + 360) % 360).toFixed(1).padStart(5, "0")}°`;
-      h.elevation.textContent = `${(90 - THREE.MathUtils.radToDeg(controls.getPolarAngle())).toFixed(1)}°`;
+    if (controls && h.azimuth && h.elevation && h.distance) {
+      const az = ((THREE.MathUtils.radToDeg(controls.azimuthAngle) % 360) + 360) % 360;
+      h.azimuth.textContent = `${az.toFixed(1).padStart(5, "0")}°`;
+      h.elevation.textContent = `${(90 - THREE.MathUtils.radToDeg(controls.polarAngle)).toFixed(1)}°`;
+      controls.getTarget(t);
+      h.distance.textContent = `${camera.position.distanceTo(t).toFixed(2)} m`;
     }
   });
   return null;
@@ -448,6 +591,8 @@ function Hud({
   const meta = STATUS_META[a.status];
   const SIcon = meta.icon;
   const accent = a.status === "nominal" ? "var(--primary)" : `var(--${a.status})`;
+  // Markers only where they carry meaning: the selection and flagged findings.
+  const marked = ORGANS.filter((o) => o.id === selected || (crew.assessments[o.id]?.status ?? "nominal") !== "nominal");
 
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden">
@@ -459,7 +604,7 @@ function Hud({
           fill="none"
           stroke={accent}
           strokeWidth="1"
-          strokeOpacity="0.8"
+          strokeOpacity="0.85"
         />
         <circle
           ref={(el) => {
@@ -470,10 +615,10 @@ function Hud({
         />
       </svg>
 
-      {ORGANS.map((o) => {
+      {marked.map((o) => {
         const status = crew.assessments[o.id]?.status ?? "nominal";
         const isSel = o.id === selected;
-        const color = isSel ? accent : status === "nominal" ? "rgba(214,224,245,0.7)" : `var(--${status})`;
+        const color = isSel ? accent : `var(--${status})`;
         return (
           <div
             key={o.id}
@@ -491,26 +636,17 @@ function Hud({
               className="group pointer-events-auto relative grid size-7 place-items-center rounded-full outline-none cursor-pointer focus-visible:ring-2 focus-visible:ring-ring"
             >
               <svg viewBox="0 0 20 20" className="size-5 transition-transform duration-200 group-hover:scale-125" aria-hidden>
-                {isSel ? (
-                  <>
-                    <circle
-                      cx="10"
-                      cy="10"
-                      r="7.5"
-                      fill="none"
-                      stroke={color}
-                      strokeWidth="1.2"
-                      strokeDasharray="3 2.2"
-                      style={{ transformOrigin: "center", animation: "spin 6s linear infinite" }}
-                    />
-                    <circle cx="10" cy="10" r="2.2" fill={color} />
-                  </>
-                ) : (
-                  <>
-                    <path d="M10 4v3M10 13v3M4 10h3M13 10h3" stroke={color} strokeWidth="1.2" strokeLinecap="round" />
-                    <circle cx="10" cy="10" r={status === "nominal" ? 1.3 : 2.2} fill={color} />
-                  </>
-                )}
+                <circle
+                  cx="10"
+                  cy="10"
+                  r="7.5"
+                  fill="none"
+                  stroke={color}
+                  strokeWidth="1.2"
+                  strokeDasharray={isSel ? "3 2.2" : undefined}
+                  style={isSel ? { transformOrigin: "center", animation: "spin 6s linear infinite" } : undefined}
+                />
+                <circle cx="10" cy="10" r="2.2" fill={color} />
               </svg>
               {!isSel && (
                 <span className="pointer-events-none absolute top-1/2 left-7 -translate-y-1/2 whitespace-nowrap rounded border border-white/10 bg-black/70 px-1.5 py-0.5 font-mono text-[10.5px] text-foreground opacity-0 backdrop-blur transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
@@ -526,7 +662,7 @@ function Hud({
         ref={(el) => {
           hud.current.callout = el;
         }}
-        className="absolute top-[16%] right-5 w-56 rounded-md border bg-black/55 p-3 backdrop-blur-md"
+        className="absolute top-[15%] right-5 hidden w-56 rounded-md border bg-black/55 p-3 backdrop-blur-md sm:block"
         style={{ borderColor: `color-mix(in oklab, ${accent} 45%, transparent)` }}
       >
         <div className="flex items-center justify-between gap-2">
@@ -548,24 +684,23 @@ function Hud({
       </div>
 
       <div className="absolute right-5 bottom-14 hidden text-right font-mono text-[10.5px] leading-relaxed text-muted-foreground sm:block">
-        <p>
-          AZ{" "}
-          <span
-            ref={(el) => {
-              hud.current.azimuth = el;
-            }}
-            className="text-foreground tabular"
-          />
-        </p>
-        <p>
-          EL{" "}
-          <span
-            ref={(el) => {
-              hud.current.elevation = el;
-            }}
-            className="text-foreground tabular"
-          />
-        </p>
+        {(
+          [
+            ["AZ", "azimuth"],
+            ["EL", "elevation"],
+            ["DIST", "distance"],
+          ] as const
+        ).map(([label, key]) => (
+          <p key={key}>
+            {label}{" "}
+            <span
+              ref={(el) => {
+                hud.current[key] = el;
+              }}
+              className="text-foreground tabular"
+            />
+          </p>
+        ))}
       </div>
     </div>
   );
@@ -581,9 +716,46 @@ export interface BodySceneProps {
   gravity: number;
   autoRotate: boolean;
   focused: boolean;
+  layers: Layers;
+  view: { preset: ViewPreset; n: number };
+  onUserInteract: () => void;
 }
 
-function SceneContent(props: BodySceneProps & { hud: React.RefObject<HudRefs> }) {
+function Anatomy(
+  props: BodySceneProps & {
+    clock: React.RefObject<Clock>;
+    onHover: (id: OrganId | null, e?: ThreeEvent<PointerEvent>) => void;
+    onReady: () => void;
+  }
+) {
+  const parts = suspend(loadAnatomy, ["astrovital-anatomy-v2"]);
+  const { onReady } = props;
+  React.useEffect(() => onReady(), [onReady]);
+  return (
+    <>
+      <Skin part={parts.skin} clock={props.clock} visible={props.layers.skin} focused={props.focused} />
+      <Structures
+        parts={parts}
+        crew={props.crew}
+        selected={props.selected}
+        focused={props.focused}
+        layers={props.layers}
+        clock={props.clock}
+        onSelect={props.onSelect}
+        onHover={props.onHover}
+      />
+    </>
+  );
+}
+
+function SceneContent(
+  props: BodySceneProps & {
+    hud: React.RefObject<HudRefs>;
+    keys: React.RefObject<Set<string>>;
+    onHover: (id: OrganId | null, e?: ThreeEvent<PointerEvent>) => void;
+    onReady: () => void;
+  }
+) {
   const heightScale = props.crew.heightCm / 175;
   const clock = useSceneClock(heightScale);
   return (
@@ -591,36 +763,105 @@ function SceneContent(props: BodySceneProps & { hud: React.RefObject<HudRefs> })
       <color attach="background" args={[C.bg]} />
       <group scale={heightScale}>
         <React.Suspense fallback={null}>
-          <Body clock={clock} focused={props.focused} />
+          <Anatomy {...props} clock={clock} />
         </React.Suspense>
-        <Organs crew={props.crew} selected={props.selected} onSelect={props.onSelect} clock={clock} focused={props.focused} />
       </group>
       <ScanPlane clock={clock} />
       <Platform heightScale={heightScale} focused={props.focused} />
-      <CameraRig selected={props.selected} focused={props.focused} heightScale={heightScale} autoRotate={props.autoRotate} />
+      <CameraRig
+        selected={props.selected}
+        focused={props.focused}
+        heightScale={heightScale}
+        autoRotate={props.autoRotate}
+        view={props.view}
+        keys={props.keys}
+        onUserInteract={props.onUserInteract}
+      />
       <Projector hud={props.hud} heightScale={heightScale} selected={props.selected} />
       <EffectComposer multisampling={4}>
-        <Bloom mipmapBlur intensity={0.9} luminanceThreshold={0.32} luminanceSmoothing={0.3} radius={0.72} />
-        <Vignette offset={0.28} darkness={0.72} />
-        
+        <Bloom mipmapBlur intensity={0.6} luminanceThreshold={0.55} luminanceSmoothing={0.25} radius={0.65} />
+        <Vignette offset={0.3} darkness={0.7} />
       </EffectComposer>
     </>
   );
 }
 
+const KEYS = new Set(["w", "a", "s", "d", "q", "e", "shift", "arrowleft", "arrowright", "arrowup", "arrowdown"]);
+
 export default function BodyScene(props: BodySceneProps) {
-  const hud = React.useRef<HudRefs>({ markers: {}, leader: null, leaderDot: null, callout: null, azimuth: null, elevation: null });
+  const hud = React.useRef<HudRefs>({ markers: {}, leader: null, leaderDot: null, callout: null, azimuth: null, elevation: null, distance: null });
+  const keys = React.useRef<Set<string>>(new Set());
+  const container = React.useRef<HTMLDivElement>(null);
+  const label = React.useRef<HTMLDivElement>(null);
+  const [ready, setReady] = React.useState(false);
+  // Adaptive resolution: drop pixel ratio on weaker GPUs, raise it back when there is headroom.
+  const [dpr, setDpr] = React.useState(1.5);
+  const onReady = React.useCallback(() => setReady(true), []);
+  const { onUserInteract } = props;
+
+  const onHover = React.useCallback((id: OrganId | null, e?: ThreeEvent<PointerEvent>) => {
+    const el = label.current;
+    const box = container.current?.getBoundingClientRect();
+    if (!el) return;
+    if (!id || !e || !box) {
+      el.style.opacity = "0";
+      return;
+    }
+    el.textContent = ORGAN_BY_ID[id].name;
+    el.style.opacity = "1";
+    el.style.transform = `translate3d(${e.nativeEvent.clientX - box.left + 14}px, ${e.nativeEvent.clientY - box.top + 14}px, 0)`;
+  }, []);
+
   return (
-    <div className="relative size-full">
+    <div
+      ref={container}
+      className="relative size-full outline-none"
+      tabIndex={0}
+      aria-label="Gemelo digital 3D. Arrastrar para rotar, botón derecho para desplazar, rueda para acercar, WASD/QE para moverse."
+      onPointerDown={() => container.current?.focus({ preventScroll: true })}
+      onKeyDown={(e) => {
+        const k = e.key.toLowerCase();
+        if (!KEYS.has(k)) return;
+        e.preventDefault();
+        if (!keys.current.has(k)) {
+          keys.current.add(k);
+          onUserInteract();
+        }
+      }}
+      onKeyUp={(e) => keys.current.delete(e.key.toLowerCase())}
+      onBlur={() => keys.current.clear()}
+      onContextMenu={(e) => e.preventDefault()}
+    >
       <Canvas
-        camera={{ position: [0.9, 1.9, 6.2], fov: 32, near: 0.03, far: 40 }}
-        dpr={[1, 1.75]}
+        camera={{ position: [1.4, 1.9, 6.2], fov: 32, near: 0.01, far: 40 }}
+        dpr={dpr}
         gl={{ antialias: false, powerPreference: "high-performance", stencil: false }}
-        onPointerMissed={() => (document.body.style.cursor = "")}
+        onPointerMissed={() => {
+          document.body.style.cursor = "";
+          onHover(null);
+        }}
       >
-        <SceneContent {...props} hud={hud} />
+        <PerformanceMonitor
+          bounds={() => [45, 58]}
+          flipflops={4}
+          onIncline={() => setDpr((d) => Math.min(d + 0.25, 2))}
+          onDecline={() => setDpr((d) => Math.max(d - 0.25, 0.75))}
+        />
+        <SceneContent {...props} hud={hud} keys={keys} onHover={onHover} onReady={onReady} />
       </Canvas>
       <Hud crew={props.crew} selected={props.selected} onSelect={props.onSelect} hud={hud} />
+      {!ready && (
+        <div className="pointer-events-none absolute inset-0 grid place-items-center" data-testid="anatomy-loading">
+          <div className="flex flex-col items-center gap-3 text-muted-foreground">
+            <div className="size-8 animate-spin rounded-full border-2 border-border border-t-primary" />
+            <span className="font-mono text-[11px] tracking-[0.12em] uppercase">Cargando modelo anatómico · 696k polígonos</span>
+          </div>
+        </div>
+      )}
+      <div
+        ref={label}
+        className="pointer-events-none absolute top-0 left-0 z-10 rounded border border-white/10 bg-black/75 px-2 py-1 font-mono text-[11px] text-foreground opacity-0 backdrop-blur transition-opacity duration-150"
+      />
     </div>
   );
 }

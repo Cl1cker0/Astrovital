@@ -16,7 +16,7 @@ const KIND: Record<ClinicalFileKind, { icon: LucideIcon; label: string; organ: O
   pdf: { icon: FileText, label: "Documento", organ: "heart", stages: ["Extrayendo texto (OCR)", "Segmentando 12 derivaciones", "Correlacionando con telemetría"] },
   audio: { icon: AudioLines, label: "Audio", organ: "heart", stages: ["Transformada espectral (FFT)", "Clasificando ruidos cardíacos", "Correlacionando con ECG"] },
   video: { icon: Video, label: "Vídeo", organ: "heart", stages: ["Decodificando fotogramas", "Segmentando bordes endocárdicos", "Calculando FEVI"] },
-  dicom: { icon: ScanEye, label: "DICOM", organ: "brain", stages: ["Reconstrucción volumétrica", "Midiendo capa de fibras nerviosas", "Estimando PIC"] },
+  dicom: { icon: ScanEye, label: "DICOM", organ: "eyes", stages: ["Reconstrucción volumétrica", "Midiendo capa de fibras nerviosas", "Estimando PIC"] },
 };
 
 function kindFromName(name: string): ClinicalFileKind {

@@ -6,12 +6,26 @@ const common = /* glsl */ `
   varying vec3 vWorld;
 `;
 
+/**
+ * Numerically safe facing term. Degenerate triangles give zero-length normals and
+ * |dot| can exceed 1 by rounding; either would make pow() return NaN, which bloom
+ * then smears across the whole frame (black screen) or turns into white halos.
+ */
+const safeFacing = /* glsl */ `
+  float facingTerm() {
+    float ln = length(vNormal);
+    float lv = length(vView);
+    if (!(ln > 1e-5) || !(lv > 1e-5)) return 1.0; // also catches NaN
+    return clamp(abs(dot(vNormal / ln, vView / lv)), 0.0, 1.0);
+  }
+`;
+
 const vertex = /* glsl */ `
   ${common}
   void main() {
     vec4 wp = modelMatrix * vec4(position, 1.0);
     vWorld = wp.xyz;
-    vNormal = normalize(mat3(modelMatrix) * normal);
+    vNormal = mat3(modelMatrix) * normal; // normalised (safely) per fragment
     vView = normalize(cameraPosition - wp.xyz);
     gl_Position = projectionMatrix * viewMatrix * wp;
   }
@@ -24,11 +38,10 @@ const shellFragment = /* glsl */ `
   uniform float uScan;
   uniform float uReveal;
   uniform float uOpacity;
+  ${safeFacing}
   void main() {
     if (vWorld.y > uReveal) discard;
-    vec3 n = normalize(vNormal);
-    float facing = abs(dot(n, normalize(vView)));
-    float fres = pow(1.0 - facing, 3.0);
+    float fres = pow(1.0 - facingTerm(), 3.0);
 
     float f = vWorld.y * 100.0;                 // 1 cm slices
     float minor = 1.0 - min(abs(fract(f - 0.5) - 0.5) / fwidth(f), 1.0);
@@ -38,9 +51,9 @@ const shellFragment = /* glsl */ `
     float scan = exp(-pow((vWorld.y - uScan) * 45.0, 2.0));
     float edge = smoothstep(0.03, 0.0, uReveal - vWorld.y);
 
-    float a = fres * 0.62 + minor * 0.025 + major * 0.08 * (0.3 + fres) + scan * 0.18 + edge * 0.5;
-    vec3 col = uColor * (0.45 + fres * 0.8) + vec3(0.75, 0.85, 1.0) * (scan * 0.35 + edge);
-    gl_FragColor = vec4(col, a * uOpacity);
+    float a = fres * 0.62 + minor * 0.025 + major * 0.08 * (0.3 + fres) + scan * 0.07 + edge * 0.5;
+    vec3 col = uColor * (0.45 + fres * 0.8) + vec3(0.75, 0.85, 1.0) * (scan * 0.15 + edge);
+    gl_FragColor = vec4(min(col, vec3(2.0)), clamp(a * uOpacity, 0.0, 1.0));
   }
 `;
 
@@ -52,16 +65,17 @@ const xrayFragment = /* glsl */ `
   uniform float uFill;
   uniform float uScan;
   uniform float uReveal;
+  ${safeFacing}
   void main() {
     if (vWorld.y > uReveal) discard;
-    vec3 n = normalize(vNormal);
-    float facing = abs(dot(n, normalize(vView)));
-    float fres = pow(1.0 - facing, 2.2);
+    float ln = length(vNormal);
+    vec3 n = (ln > 1e-5) ? vNormal / ln : vec3(0.0, 0.0, 1.0);
+    float fres = pow(1.0 - facingTerm(), 2.2);
     float scan = exp(-pow((vWorld.y - uScan) * 45.0, 2.0));
     float light = 0.5 + 0.5 * dot(n, normalize(vec3(0.3, 0.8, 0.5)));
-    vec3 col = uColor * (uFill * light + fres * 1.3) * uIntensity + uColor * scan * 0.5;
-    float a = (uFill * 0.55 + fres * 0.9) * uIntensity + scan * 0.2;
-    gl_FragColor = vec4(col, clamp(a, 0.0, 1.0));
+    vec3 col = uColor * (uFill * light + fres * 1.3) * uIntensity + uColor * scan * 0.18 * uIntensity;
+    float a = (uFill * 0.55 + fres * 0.9) * uIntensity + scan * 0.06 * uIntensity;
+    gl_FragColor = vec4(min(col, vec3(2.0)), clamp(a, 0.0, 1.0));
   }
 `;
 
@@ -120,8 +134,8 @@ export function makePointsMaterial(color: THREE.Color, pixelRatio: number) {
         gl_Position = projectionMatrix * mv;
         float scan = exp(-pow((wp.y - uScan) * 30.0, 2.0));
         float twinkle = 0.55 + 0.45 * sin(uTime * 1.6 + aRand * 60.0);
-        vAlpha = (0.16 * twinkle + scan * 0.45) * step(wp.y, uReveal);
-        gl_PointSize = uSize * uPixelRatio * (1.0 + scan * 0.6) * (2.6 / -mv.z);
+        vAlpha = (0.16 * twinkle + scan * 0.3) * step(wp.y, uReveal);
+        gl_PointSize = min(uSize * uPixelRatio * (1.0 + scan * 0.6) * (2.6 / -mv.z), 4.0 * uPixelRatio);
       }
     `,
     fragmentShader: /* glsl */ `

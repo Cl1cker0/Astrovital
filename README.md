@@ -44,7 +44,13 @@ acompañada de icono y etiqueta. Tokens en `src/app/globals.css`.
 
 ## Gemelo digital
 
-La anatomía se genera proceduralmente (sin archivos externos), así que funciona
-offline. Para usar un modelo propio, coloca un `.glb` en `public/models/` y cárgalo
-con `useGLTF` de drei dentro de `Rig` en `src/components/twin/body-scene.tsx`.
-Los puntos de anclaje de los órganos están en `ORGANS` (`src/lib/data/mock.ts`).
+Modelo anatómico real de **BodyParts3D** (CC BY-SA 2.1 JP): piel, 12 sistemas de
+órganos (cerebro con circunvoluciones, corazón con válvulas y coronarias, lóbulos
+pulmonares, circulación pulmonar…) y 11 regiones del esqueleto con cada hueso
+individual. Todo es seleccionable con clic, en el visor o desde el inspector.
+
+- Controles: arrastrar para rotar, botón derecho para desplazar, rueda para hacer
+  zoom hacia el cursor, WASD/QE para moverse, flechas para orbitar, Shift acelera.
+- Capas (piel, órganos, esqueleto, vasos) y vistas predefinidas.
+- El modelo se regenera con `scripts/build-anatomy.mjs`; ver
+  `public/models/README.md` para la fuente, la licencia y el formato.

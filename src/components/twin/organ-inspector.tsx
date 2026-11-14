@@ -9,6 +9,11 @@ import { STATUS_META } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/components/providers/toast-provider";
 
+const GROUPS = [
+  { label: "Órganos y sistemas", items: ORGANS.filter((o) => o.category !== "bone") },
+  { label: "Esqueleto", items: ORGANS.filter((o) => o.category === "bone") },
+];
+
 export function OrganInspector() {
   const { selectedCrew, selectedOrgan, selectOrgan } = useMission();
   const toast = useToast();
@@ -17,31 +22,37 @@ export function OrganInspector() {
 
   return (
     <div className="flex flex-col">
-      <div className="border-b p-5">
-        <p className="eyebrow mb-2.5">Sistemas · {ORGANS.length}</p>
-        <div className="flex flex-wrap gap-1.5" role="listbox" aria-label="Seleccionar órgano">
-          {ORGANS.map((o) => {
-            const st = selectedCrew.assessments[o.id]?.status ?? "nominal";
-            const active = o.id === selectedOrgan;
-            const Icon = STATUS_META[st].icon;
-            return (
-              <button
-                key={o.id}
-                role="option"
-                aria-selected={active}
-                type="button"
-                onClick={() => selectOrgan(o.id)}
-                className={cn(
-                  "inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-[12px] transition-colors cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
-                  active ? "border-primary/50 bg-primary/10 text-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground"
-                )}
-              >
-                {st !== "nominal" && <Icon className={cn("size-3", STATUS_META[st].text)} aria-label={STATUS_META[st].label} />}
-                {o.name.split(" /")[0]}
-              </button>
-            );
-          })}
-        </div>
+      <div className="space-y-4 border-b p-5">
+        {GROUPS.map((g) => (
+          <div key={g.label}>
+            <p className="eyebrow mb-2">
+              {g.label} · {g.items.length}
+            </p>
+            <div className="flex flex-wrap gap-1.5" role="listbox" aria-label={g.label}>
+              {g.items.map((o) => {
+                const st = selectedCrew.assessments[o.id]?.status ?? "nominal";
+                const active = o.id === selectedOrgan;
+                const Icon = STATUS_META[st].icon;
+                return (
+                  <button
+                    key={o.id}
+                    role="option"
+                    aria-selected={active}
+                    type="button"
+                    onClick={() => selectOrgan(o.id)}
+                    className={cn(
+                      "inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-[12px] transition-colors cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+                      active ? "border-primary/50 bg-primary/10 text-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                    )}
+                  >
+                    {st !== "nominal" && <Icon className={cn("size-3", STATUS_META[st].text)} aria-label={STATUS_META[st].label} />}
+                    {o.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
 
       <div className="flex flex-1 flex-col p-5" aria-live="polite">

@@ -7,17 +7,31 @@ export type Status = "nominal" | "caution" | "critical";
 
 export type OrganId =
   | "brain"
-  | "inner-ear"
+  | "eyes"
   | "thyroid"
   | "lungs"
   | "heart"
+  | "vessels"
   | "liver"
   | "stomach"
+  | "spleen"
+  | "pancreas"
   | "kidneys"
   | "intestine"
-  | "wrist"
+  | "skull"
+  | "spine"
+  | "ribcage"
+  | "shoulder"
+  | "humerus"
+  | "forearm"
+  | "hand"
+  | "pelvis"
   | "femur"
-  | "calcaneus";
+  | "tibia"
+  | "calcaneus"
+  | "wrist";
+
+export type OrganCategory = "organ" | "bone" | "device";
 
 export interface Metric {
   label: string;
@@ -31,8 +45,11 @@ export interface OrganInfo {
   id: OrganId;
   name: string;
   system: string;
+  category: OrganCategory;
   /** Position inside the 3D twin, metres, feet at y=0 */
   anchor: [number, number, number];
+  /** Bounding radius around the anchor, used to frame the camera */
+  radius: number;
 }
 
 /** table: organ_assessments (crew_id, organ_id) */

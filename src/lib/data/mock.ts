@@ -26,18 +26,18 @@ export const ENVIRONMENTS: MissionEnvironment[] = [
 ];
 
 export const ORGANS: OrganInfo[] = [
-  { id: "brain", name: "Cerebro / SANS", system: "Neuro-ocular", anchor: [0, 1.66, 0.02] },
-  { id: "inner-ear", name: "Oído interno", system: "Vestibular", anchor: [0.085, 1.6, 0] },
-  { id: "thyroid", name: "Tiroides", system: "Endocrino", anchor: [0, 1.47, 0.045] },
-  { id: "lungs", name: "Pulmones", system: "Respiratorio", anchor: [-0.075, 1.31, 0.03] },
-  { id: "heart", name: "Corazón", system: "Cardiovascular", anchor: [0.03, 1.27, 0.06] },
-  { id: "liver", name: "Hígado", system: "Hepático", anchor: [-0.06, 1.15, 0.05] },
-  { id: "stomach", name: "Estómago", system: "Digestivo", anchor: [0.06, 1.14, 0.05] },
-  { id: "kidneys", name: "Riñones", system: "Renal", anchor: [0.065, 1.07, -0.04] },
+  { id: "brain", name: "Cerebro / SANS", system: "Neuro-ocular", anchor: [0, 1.662, 0.005] },
+  { id: "inner-ear", name: "Oído interno", system: "Vestibular", anchor: [0.068, 1.622, 0.0] },
+  { id: "thyroid", name: "Tiroides", system: "Endocrino", anchor: [0, 1.462, 0.03] },
+  { id: "lungs", name: "Pulmones", system: "Respiratorio", anchor: [-0.072, 1.31, 0.03] },
+  { id: "heart", name: "Corazón", system: "Cardiovascular", anchor: [0.028, 1.265, 0.06] },
+  { id: "liver", name: "Hígado", system: "Hepático", anchor: [-0.05, 1.175, 0.05] },
+  { id: "stomach", name: "Estómago", system: "Digestivo", anchor: [0.06, 1.16, 0.055] },
+  { id: "kidneys", name: "Riñones", system: "Renal", anchor: [0.054, 1.085, -0.05] },
   { id: "intestine", name: "Microbioma", system: "Gastrointestinal", anchor: [0, 1.0, 0.06] },
-  { id: "wrist", name: "Sensor de muñeca", system: "Telemetría SUIT", anchor: [0.255, 0.885, 0.02] },
-  { id: "femur", name: "Fémur", system: "Músculo-esquelético", anchor: [0.09, 0.72, 0.05] },
-  { id: "calcaneus", name: "Calcáneo", system: "Fluid shift podálico", anchor: [0.09, 0.05, -0.02] },
+  { id: "wrist", name: "Sensor de muñeca", system: "Telemetría SUIT", anchor: [0.425, 1.125, 0.115] },
+  { id: "femur", name: "Fémur", system: "Músculo-esquelético", anchor: [0.126, 0.68, -0.008] },
+  { id: "calcaneus", name: "Calcáneo", system: "Fluid shift podálico", anchor: [0.226, 0.035, -0.062] },
 ];
 
 export const ORGAN_BY_ID = Object.fromEntries(ORGANS.map((o) => [o.id, o])) as Record<OrganId, OrganInfo>;
